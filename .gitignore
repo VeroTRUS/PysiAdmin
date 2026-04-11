@@ -1,0 +1,8 @@
+.env
+pysi-config.json
+*.log
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
