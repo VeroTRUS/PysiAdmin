@@ -1,7 +1,6 @@
 """
 PysiAdmin — commands/files.py
 File listing, download (host→Discord), and upload (Discord→host).
-All paths are explicit and logged. No silent exfiltration.
 """
 
 from __future__ import annotations
@@ -31,7 +30,16 @@ class FileCommands(commands.Cog, name="Files"):
 
     @file_group.command(name="ls")
     @require_tier(Tier.OPERATOR)
-    async def file_ls(self, ctx: commands.Context, path: str = ".") -> None:
+    async def file_ls(
+        self,
+        ctx: commands.Context,
+        path: str = None,   # ← FIX: was "." which exposed agent CWD
+    ) -> None:
+        # Default to the home directory of the user running the agent,
+        # never to the agent's working directory.
+        if path is None:
+            path = str(Path.home())
+
         if not self.bot.cmd_parser.validate_path(path):
             await ctx.send("❌ Invalid path.")
             return
@@ -67,12 +75,11 @@ class FileCommands(commands.Cog, name="Files"):
     @file_group.command(name="download")
     @require_tier(Tier.OPERATOR)
     async def file_download(self, ctx: commands.Context, path: str) -> None:
-        """Send a file from the host to this Discord channel."""
         if not self.bot.cmd_parser.validate_path(path):
             await ctx.send("❌ Invalid path.")
             return
 
-        p = Path(path).expanduser().resolve()
+        p    = Path(path).expanduser().resolve()
         if not p.is_file():
             await ctx.send(f"❌ File `{p}` not found.")
             return
@@ -82,8 +89,7 @@ class FileCommands(commands.Cog, name="Files"):
 
         if size > max_size:
             await ctx.send(
-                f"❌ File too large ({size:,} bytes). "
-                f"Limit is {max_size:,} bytes."
+                f"❌ File too large ({size:,} bytes). Limit: {max_size:,} bytes."
             )
             await self.bot.audit.log_command(
                 str(ctx.author.id), f".file download {path}", "DENIED", f"size={size}"
@@ -105,7 +111,6 @@ class FileCommands(commands.Cog, name="Files"):
     @file_group.command(name="upload")
     @require_tier(Tier.ADMIN)
     async def file_upload(self, ctx: commands.Context, dest_path: str) -> None:
-        """Save an attached file to the host at dest_path."""
         if not ctx.message.attachments:
             await ctx.send("❌ Attach a file to your message.")
             return
@@ -117,10 +122,9 @@ class FileCommands(commands.Cog, name="Files"):
         dest = Path(dest_path).expanduser().resolve()
 
         if dest.exists():
-            # TODO: implement a proper confirmation flow with a follow-up listener
+            # TODO: confirmation flow
             await ctx.send(
-                f"⚠️ `{dest}` already exists. "
-                "Overwrite not yet implemented — delete the file manually first."
+                f"⚠️ `{dest}` already exists. Delete it on the host first."
             )
             await self.bot.audit.log_command(
                 str(ctx.author.id), f".file upload {dest_path}", "DENIED", "would overwrite"

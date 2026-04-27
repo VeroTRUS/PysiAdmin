@@ -1,6 +1,9 @@
 # PysiAdmin
 ### Personal System Administration Blueprint
 
+> **Current version: 0.1.5**  
+> See [CHANGELOG.md](CHANGELOG.md) for what changed. See [DOCS.md](DOCS.md) for full source documentation.
+
 ## What is PysiAdmin?
 PysiAdmin is a transparent, remote administration agent designed for personal infrastructure management via a Discord-based Command & Control (C2) interface.
 
@@ -18,7 +21,7 @@ Originally derived from the Pysilon codebase, PysiAdmin has been ***completely g
 
 **CPU architectures:** x86\_64 (AMD64 & Intel64), ARM64, IBM PowerPC, RISC-V, IBM s390x
 
-> **Note:** The eBPF exec tracer (`ebpf/monitor.py`) requires Linux 4.7+ and `python3-bcc`. The rest of the agent runs on any Linux 4.x+ with Python 3.10+.
+> **Note:** The eBPF tracers (`ebpf/monitor.py`) require Linux 4.7+ and `python3-bcc`. The rest of the agent runs on any Linux 4.x+ with Python 3.10+.
 
 ---
 
@@ -27,7 +30,8 @@ Originally derived from the Pysilon codebase, PysiAdmin has been ***completely g
 - Python 3.10 or newer
 - A Discord bot token (see below)
 - `git`, `gcc`, `make`
-- `bcc` + `python3-bcc` + `kernel-devel` (for the eBPF tracer — optional but recommended)
+- `cryptography` Python package (installed via `requirements.txt`)
+- `bcc` + `python3-bcc` + `kernel-devel` — for the eBPF tracer (optional but recommended)
 
 ---
 
@@ -101,7 +105,7 @@ sudo eopkg install git gcc make python3 python3-pip kernel-headers
 
 ### LFS (Linux From Scratch)
 
-Install `python3`, `gcc`, `make`, and `kernel-headers` per your LFS book.
+Install `python3`, `gcc`, `make`, and `kernel-headers` per your LFS book.  
 BCC must be built from source: https://github.com/iovisor/bcc/blob/master/INSTALL.md
 
 ---
@@ -109,7 +113,7 @@ BCC must be built from source: https://github.com/iovisor/bcc/blob/master/INSTAL
 ## Clone and Set Up
 
 ```bash
-git clone https://github.com/opfts/PysiAdmin.git
+git clone https://github.com/VeroTRUS/PysiAdmin.git
 cd PysiAdmin
 ```
 
@@ -132,7 +136,11 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Build the native sysinfo helper (optional)
+### Build the native helpers
+
+Builds `native/sysinfo` (JSON system info binary) and `native/libpysiasm.so`
+(arch-specific assembly for secure memory wiping). Architecture is detected
+automatically — x86\_64, ARM64, ppc64le, riscv64, and s390x are supported.
 
 ```bash
 make -C native
@@ -144,13 +152,33 @@ make -C native
 
 ### 1. Bot Token
 
-Create a `.env` file in the project root (this file is gitignored — never commit it):
+Create a `.env` file in the project root (gitignored — never commit it):
 
 ```bash
 echo 'DISCORD_BOT_TOKEN=YOUR_TOKEN_HERE' > .env
 ```
 
-Replace `YOUR_TOKEN_HERE` with the token you copied from the Discord Developer Portal.
+Replace `YOUR_TOKEN_HERE` with the token from the Discord Developer Portal.
+
+#### Optional — Audit log encryption
+
+Generate a Fernet key and add it to `.env` to encrypt log lines written to disk:
+
+```bash
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Add the output to `.env`:
+
+```bash
+echo 'PYSI_ENCRYPTION_KEY=YOUR_GENERATED_KEY_HERE' >> .env
+```
+
+Then enable it in `pysi-config.json`:
+
+```json
+"encrypt_logs": true
+```
 
 ### 2. `pysi-config.json`
 
@@ -162,6 +190,7 @@ On first run, PysiAdmin generates a default `pysi-config.json`. Edit it before s
   "admin_ids":    [],
   "operator_ids": [],
   "observer_ids": [],
+  "exec_mode":    "whitelist",
   "exec_whitelist": [
     "uptime",
     "df -h",
@@ -169,20 +198,25 @@ On first run, PysiAdmin generates a default `pysi-config.json`. Edit it before s
     "ip addr",
     "systemctl status"
   ],
+  "encrypt_logs": false,
   "file_transfer_max_bytes": 52428800,
   "log_channel_id": null,
   "log_dir": "logs"
 }
 ```
 
-- `owner_ids` — your Discord user ID (string). Full control. **Add this first.**
-- `admin_ids` — users who can run `.exec` (whitelist only) and `.file upload`
-- `operator_ids` — users who can run `.kill`, `.file ls`, `.file download`
-- `observer_ids` — users who can run read-only commands (`.status`, `.ps`, etc.)
-- `exec_whitelist` — shell commands allowed via `.exec`. Add exact commands or prefixes.
-- `file_transfer_max_bytes` — max file size for `.file download` (default 50 MB)
-- `log_channel_id` — optional Discord channel ID to mirror audit log entries
-- `log_dir` — local directory for audit logs (default `logs/`, gitignored)
+| Field | Description |
+|---|---|
+| `owner_ids` | Your Discord user ID (string). Full control. **Add this first.** |
+| `admin_ids` | Users who can run `.exec` and `.file upload` |
+| `operator_ids` | Users who can run `.kill`, `.file ls`, `.file download` |
+| `observer_ids` | Users who can run read-only commands |
+| `exec_mode` | `"whitelist"` (safest, default) or `"denylist"` (more freedom — see below) |
+| `exec_whitelist` | Commands allowed via `.exec` in whitelist mode |
+| `encrypt_logs` | Encrypt audit log lines on disk with Fernet (requires `PYSI_ENCRYPTION_KEY`) |
+| `file_transfer_max_bytes` | Max file size for `.file download` (default 50 MB) |
+| `log_channel_id` | Optional Discord channel ID to mirror audit log entries |
+| `log_dir` | Local log directory (default `logs/`, gitignored) |
 
 ---
 
@@ -190,12 +224,12 @@ On first run, PysiAdmin generates a default `pysi-config.json`. Edit it before s
 
 | Tier | Who sets it | Available commands |
 |---|---|---|
-| 👑 Owner | `owner_ids` in config | All commands including `.exec-raw`, `.agent`, `.shutdown` |
-| ⚙️ Admin | `admin_ids` in config | `.exec <whitelisted>`, `.file upload`, `.config get/set` |
-| 🔧 Operator | `operator_ids` in config | `.kill <pid>`, `.file ls`, `.file download` |
-| 🔍 Observer | `observer_ids` in config | `.status`, `.sysinfo`, `.uptime`, `.whoami`, `.ps` |
+| 👑 Owner | `owner_ids` | All commands including `.exec-raw`, `.agent`, `.shutdown` |
+| ⚙️ Admin | `admin_ids` | `.exec`, `.file upload`, `.config get/set` |
+| 🔧 Operator | `operator_ids` | `.kill <pid>`, `.file ls`, `.file download` |
+| 🔍 Observer | `observer_ids` | `.status`, `.sysinfo`, `.uptime`, `.whoami`, `.ps` |
 
-Anyone not in any list is silently denied and logged.
+Anyone not in any list is denied and logged.
 
 ---
 
@@ -219,15 +253,15 @@ Anyone not in any list is silently denied and logged.
 ### Files (Operator+ / Admin+)
 | Command | Description |
 |---|---|
-| `.file ls <path>` | List a directory (Operator+) |
+| `.file ls [path]` | List a directory — defaults to home dir (Operator+) |
 | `.file download <path>` | Send a file to Discord (Operator+) |
 | `.file upload <dest_path>` | Save an attached file to the host (Admin+) |
 
 ### Execution (Admin+ / Owner)
 | Command | Description |
 |---|---|
-| `.exec <command>` | Run a whitelisted shell command (Admin+) |
-| `.exec-raw <command>` | Run any shell command — blocked-pattern guard still applies (Owner only) |
+| `.exec <command>` | Run a shell command — whitelist or denylist mode (Admin+) |
+| `.exec-raw <command>` | Run any command — `BLOCKED_PATTERNS` still apply (Owner only) |
 
 ### Config (Admin+)
 | Command | Description |
@@ -245,11 +279,49 @@ Anyone not in any list is silently denied and logged.
 
 ---
 
+## Execution Modes
+
+### `whitelist` (default, safest)
+
+`.exec` only runs commands listed in `exec_whitelist`. Anything not listed is denied.
+
+```json
+"exec_mode": "whitelist"
+```
+
+### `denylist` (more freedom)
+
+`.exec` runs any command that does not match `BLOCKED_PATTERNS` or
+`BLOCKED_COMMANDS` (hardcoded in `commands/exec.py`). The `exec_whitelist`
+field is ignored in this mode.
+
+```json
+"exec_mode": "denylist"
+```
+
+Permanently blocked in denylist mode (not configurable remotely):
+`rm`, `dd`, `sudo`, `bash`, `python3`, `curl`, `wget`, `ssh`, `nc`, `strace`,
+`kill`, `reboot`, `modprobe`, `docker`, and more — see `BLOCKED_COMMANDS`
+in `commands/exec.py` for the full list.
+
+### Always blocked (all modes, all tiers, including `.exec-raw`)
+
+These patterns are hardcoded and can only be changed by editing `commands/exec.py` on disk:
+
+```
+/etc/shadow       /etc/gshadow      /etc/sudoers
+/root/            /proc/kcore       /dev/mem
+/boot/            /sys/firmware     .ssh/id_
+.env              pysi-config       DISCORD_BOT_TOKEN
+```
+
+---
+
 ## Adding and Restricting Commands
 
 ### Adding a command to the exec whitelist
 
-Edit `pysi-config.json` on the host machine and add to `exec_whitelist`:
+Edit `pysi-config.json` and add to `exec_whitelist`:
 
 ```json
 "exec_whitelist": [
@@ -260,32 +332,25 @@ Edit `pysi-config.json` on the host machine and add to `exec_whitelist`:
 ]
 ```
 
-Entries match exactly or as a prefix — `"journalctl -n"` allows `journalctl -n 100`, `journalctl -n 50`, etc.
+Entries match exactly or as a prefix — `"journalctl -n"` allows
+`journalctl -n 100`, `journalctl -n 50`, etc.
 
-Restart the agent after editing:
-```
-.agent restart
-```
+Apply without restarting the bot:
 
-Or remotely via Discord if the agent is running:
 ```
 .config set exec_whitelist ["uptime","df -h","lsblk","journalctl -n 100"]
 ```
 
-### Restricting a command (removing from whitelist)
-
-Remove the entry from `exec_whitelist` in `pysi-config.json` and restart.
-
-### Permanently blocked paths and tokens
-
-The following patterns are hardcoded in `commands/exec.py` and are **never** executable even by Owner via `.exec-raw`. To change them you must edit the source file on disk:
+Or restart after editing the file on disk:
 
 ```
-/etc/shadow       /etc/gshadow      /etc/sudoers
-/root/            /proc/kcore       /dev/mem
-/boot/            /sys/firmware     .ssh/id_
-.env              pysi-config       DISCORD_BOT_TOKEN
+.agent restart
 ```
+
+### Restricting a command
+
+Remove the entry from `exec_whitelist` and restart, or switch back to
+`whitelist` mode if you were using `denylist`.
 
 ---
 
@@ -300,15 +365,19 @@ python3 pysi_admin.py
 ```
 
 Expected output:
+
 ```
+[crypto] Encryption enabled (Fernet / AES-128-CBC + HMAC-SHA256).   <- if key is set
 [PysiAdmin] Online as PysiAdmin#1607 (ID: ...)
 [PysiAdmin] Owner IDs: ['YOUR_ID_HERE']
+[PysiAdmin] Exec mode: whitelist
 [PysiAdmin] 12:00:00 | SYS | event='agent_start' ...
 ```
 
-### Terminal 2 — eBPF exec tracer (optional, requires root)
+### Terminal 2 — eBPF tracers (optional, requires root)
 
-Traces every `execve` syscall on the host and logs it to `logs/ebpf_YYYYMMDD.log`.
+Traces every `execve` and outbound TCP/UDP `connect` syscall on the host.
+Logs to `logs/ebpf_YYYYMMDD.log`.
 
 ```bash
 cd PysiAdmin
@@ -316,13 +385,17 @@ sudo .venv/bin/python3 ebpf/monitor.py
 ```
 
 Expected output:
+
 ```
-2026-04-11T12:00:01 UTC | Loading BPF program ...
-2026-04-11T12:00:04 UTC | Tracing execve syscalls — Ctrl+C to stop.
-2026-04-11T12:00:10 UTC | EXEC | pid=1234 ppid=1000 uid=1000 comm=bash file=/usr/bin/ls
+2026-04-26T12:00:01 UTC | Loading exec probe from ebpf/probes/exec_monitor.c
+2026-04-26T12:00:02 UTC | Loading net probe from ebpf/probes/net_monitor.c
+2026-04-26T12:00:03 UTC | Tracing execve + connect syscalls -- Ctrl+C to stop.
+2026-04-26T12:00:10 UTC | EXEC | ts_ms=... pid=1234 ppid=1000 uid=1000 comm=bash                 file=/usr/bin/ls
+2026-04-26T12:00:11 UTC | NET  | pid=1234 uid=1000 comm=curl                 dst=93.184.216.34:443
 ```
 
-> If `python3-bcc` is a system package (Fedora, Arch), make sure you created your venv with `--system-site-packages`.
+> If `python3-bcc` is a system package (Fedora, Arch), make sure you created
+> your venv with `--system-site-packages`.
 
 ---
 
@@ -331,11 +404,22 @@ Expected output:
 All commands are logged locally regardless of outcome:
 
 ```
-logs/pysi_admin_YYYYMMDD.log   ← bot command audit trail
-logs/ebpf_YYYYMMDD.log         ← system-wide execve trace (if tracer is running)
+logs/pysi_admin_YYYYMMDD.log   <- bot command audit trail (optionally encrypted)
+logs/ebpf_YYYYMMDD.log         <- execve + connect trace (if tracer is running)
 ```
 
 Log files are gitignored and never leave your machine unless you explicitly send them.
+
+To read an encrypted audit log:
+
+```python
+from dotenv import load_dotenv
+from core.crypto import CryptoManager
+load_dotenv()
+cm = CryptoManager()
+for line in open("logs/pysi_admin_YYYYMMDD.log"):
+    print(cm.decrypt_str(line.strip()))
+```
 
 ---
 
