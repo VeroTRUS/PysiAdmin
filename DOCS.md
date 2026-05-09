@@ -1,4 +1,4 @@
-# PysiAdmin — Source Documentation
+# PysiAdmin 0.2.0 — Source Documentation
 
 ## Table of Contents
 1. [Entry Point](#entry-point)

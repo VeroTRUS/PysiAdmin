@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 PysiAdmin — Personal System Administration Agent
-Copyright (C) 2026  vtrus
+Copyright (C) 2026  VeroTRUS
 Licensed under the GNU General Public License v3.0 or later.
 
-Tested on Fedora Rawhide.
-Entry point. Run: python3 pysi_admin.py
+Tested on Fedora Rawhide. BSD support added in 0.2.0.
+Run: python3 pysi_admin.py
 """
 
 from __future__ import annotations
@@ -18,11 +18,14 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from compat.platform import IS_BSD, IS_LINUX, OS_LABEL
 from config.settings import Settings
 from core.auth import AuthManager
 from core.crypto import CryptoManager
 from core.logger import AuditLogger
 from core.parser import CommandParser
+from core.ratelimit import RateLimiter
+from core.session import SessionManager
 
 load_dotenv()
 
@@ -40,17 +43,18 @@ def build_bot(settings: Settings, crypto: CryptoManager) -> commands.Bot:
     intents = discord.Intents.default()
     intents.message_content = True
 
-    bot = commands.Bot(
-        command_prefix=".",
-        intents=intents,
-        help_command=None,
-    )
+    bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
 
-    bot.settings   = settings
-    bot.crypto     = crypto
-    bot.audit      = AuditLogger(settings, crypto)
-    bot.auth       = AuthManager(settings)
-    bot.cmd_parser = CommandParser(settings)
+    bot.settings    = settings
+    bot.crypto      = crypto
+    bot.audit       = AuditLogger(settings, crypto)
+    bot.auth        = AuthManager(settings)
+    bot.cmd_parser  = CommandParser(settings)
+    bot.ratelimiter = RateLimiter(
+        max_commands   = settings.rate_limit_commands,
+        window_seconds = settings.rate_limit_window,
+    )
+    bot.sessions    = SessionManager()
 
     return bot
 
@@ -59,8 +63,11 @@ async def main() -> None:
     settings = Settings.load()
     crypto   = CryptoManager()
 
+    print(f"[PysiAdmin] Platform : {OS_LABEL}")
+    print(f"[PysiAdmin] eBPF     : {'available' if IS_LINUX else 'unavailable (BSD — use DTrace)'}")
+
     if not settings.owner_ids:
-        print("[PysiAdmin] WARNING: owner_ids is empty. Add your Discord user ID to pysi-config.json.")
+        print("[PysiAdmin] WARNING: owner_ids is empty in pysi-config.json")
 
     bot = build_bot(settings, crypto)
 
@@ -70,9 +77,10 @@ async def main() -> None:
     @bot.event
     async def on_ready() -> None:
         print(f"[PysiAdmin] Online as {bot.user} (ID: {bot.user.id})")
-        print(f"[PysiAdmin] Owner IDs: {settings.owner_ids}")
-        print(f"[PysiAdmin] Exec mode: {settings.exec_mode}")
-        await bot.audit.log_system("agent_start", f"bot={bot.user}")
+        print(f"[PysiAdmin] Owner IDs  : {settings.owner_ids}")
+        print(f"[PysiAdmin] Exec mode  : {settings.exec_mode}")
+        print(f"[PysiAdmin] Rate limit : {settings.rate_limit_commands} cmds / {settings.rate_limit_window}s")
+        await bot.audit.log_system("agent_start", f"bot={bot.user} platform={OS_LABEL}")
 
     @bot.event
     async def on_message(message: discord.Message) -> None:
@@ -81,9 +89,15 @@ async def main() -> None:
         if not message.content.startswith("."):
             return
 
-        uid  = str(message.author.id)
-        tier = bot.auth.get_tier(uid)
+        uid = str(message.author.id)
 
+        # Channel restriction
+        if settings.allowed_channel_ids:
+            if message.channel.id not in settings.allowed_channel_ids:
+                return
+
+        # Auth check
+        tier = bot.auth.get_tier(uid)
         if tier is None:
             await message.channel.send(embed=discord.Embed(
                 title="⛔ Unauthorized",
@@ -92,6 +106,19 @@ async def main() -> None:
             ))
             await bot.audit.log_command(uid, message.content, "DENIED", "not in whitelist")
             return
+
+        # Rate limit check (Owners are exempt)
+        from core.auth import Tier
+        if tier < Tier.OWNER:
+            allowed, retry = bot.ratelimiter.check(uid)
+            if not allowed:
+                await message.channel.send(embed=discord.Embed(
+                    title="🐢 Rate Limited",
+                    description=f"Too many commands. Try again in **{retry}s**.",
+                    color=discord.Color.orange(),
+                ))
+                await bot.audit.log_command(uid, message.content, "RATE_LIMITED", f"retry_after={retry}")
+                return
 
         await bot.audit.log_command(uid, message.content, "RECEIVED", f"tier={tier.name}")
         await bot.process_commands(message)

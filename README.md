@@ -1,7 +1,7 @@
 # PysiAdmin
 ### Personal System Administration Blueprint
 
-> **Current version: 0.1.5**  
+> **Current version: 0.2.0**  
 > See [CHANGELOG.md](CHANGELOG.md) for what changed. See [DOCS.md](DOCS.md) for full source documentation.
 
 ## What is PysiAdmin?
@@ -16,7 +16,7 @@ Originally derived from the Pysilon codebase, PysiAdmin has been ***completely g
 | Platform | Status |
 |---|---|
 | Linux Kernel 4.x – 7.x | ✅ Supported |
-| OpenBSD / FreeBSD / NetBSD | 🔜 Planned — 0.2.0 |
+| OpenBSD / FreeBSD / NetBSD | ✅ Supported — 0.2.0 |
 | OpenIndiana (illumos) | 🔜 Planned — 0.3.0 |
 
 **CPU architectures:** x86\_64 (AMD64 & Intel64), ARM64, IBM PowerPC, RISC-V, IBM s390x
@@ -105,8 +105,29 @@ sudo eopkg install git gcc make python3 python3-pip kernel-headers
 
 ### LFS (Linux From Scratch)
 
-Install `python3`, `gcc`, `make`, and `kernel-headers` per your LFS book.  
+Install `python3`, `gcc`, `make`, and `kernel-headers` per your LFS book.
 BCC must be built from source: https://github.com/iovisor/bcc/blob/master/INSTALL.md
+
+### FreeBSD
+
+```bash
+sudo pkg install -y git gcc gmake python3 py311-pip py311-psutil py311-cryptography
+```
+
+### OpenBSD
+
+```bash
+doas pkg_add git gcc gmake python3 py3-pip py3-cryptography
+```
+
+### NetBSD
+
+```bash
+sudo pkgin install git gcc gmake python311 py311-pip py311-cryptography
+```
+
+> **BSD note:** eBPF is not available on BSD.
+> Run `sudo sh dtrace/monitor.sh` instead of `ebpf/monitor.py`.
 
 ---
 
@@ -396,6 +417,19 @@ Expected output:
 
 > If `python3-bcc` is a system package (Fedora, Arch), make sure you created
 > your venv with `--system-site-packages`.
+
+---
+
+
+### Terminal 2 — DTrace tracers (BSD, requires root)
+
+Traces `execve`, `connect`, sensitive file opens, and privilege escalations.
+Logs to `logs/dtrace_YYYYMMDD.log`.
+
+```bash
+cd PysiAdmin
+sudo sh dtrace/monitor.sh
+```
 
 ---
 

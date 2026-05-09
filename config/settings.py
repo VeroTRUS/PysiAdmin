@@ -1,6 +1,5 @@
 """
 PysiAdmin — config/settings.py
-Loads and saves pysi-config.json (gitignored).
 """
 
 from __future__ import annotations
@@ -15,18 +14,14 @@ CONFIG_PATH = Path("pysi-config.json")
 
 @dataclass
 class Settings:
-    # ── Identity / ACL ────────────────────────────────────────────────────────
+    # ── ACL ───────────────────────────────────────────────────────────────────
     owner_ids:    List[str] = field(default_factory=list)
     admin_ids:    List[str] = field(default_factory=list)
     operator_ids: List[str] = field(default_factory=list)
     observer_ids: List[str] = field(default_factory=list)
 
-    # ── Execution policy ──────────────────────────────────────────────────────
-    # "whitelist" — only commands in exec_whitelist are allowed (default, safest)
-    # "denylist"  — any command not matching BLOCKED_PATTERNS/BLOCKED_COMMANDS
-    #               is allowed; exec_whitelist is ignored in this mode
-    exec_mode: str = "whitelist"
-
+    # ── Execution ─────────────────────────────────────────────────────────────
+    exec_mode: str = "whitelist"   # "whitelist" | "denylist"
     exec_whitelist: List[str] = field(default_factory=lambda: [
         "uptime", "date", "cal", "hostname",
         "uname -a", "uname -r",
@@ -40,54 +35,65 @@ class Settings:
         "df -h", "df -ah", "du -sh", "du -h",
         "lsblk", "lsblk -f", "blkid", "mount", "findmnt",
         "free -h", "free -m", "vmstat", "vmstat -s",
-        "lscpu", "lshw", "lspci", "lsusb",
-        "sensors", "numactl --hardware",
+        "lscpu", "lshw", "lspci", "lsusb", "sensors",
         "ps aux", "ps -ef", "pstree", "top -bn1",
         "lsof", "lsof -i",
         "ip addr", "ip route", "ip link", "ip neigh",
         "ss -tuln", "ss -tulnp",
         "netstat -tuln", "netstat -rn",
-        "nmcli", "nmcli device status", "nmcli connection show",
+        "nmcli", "nmcli device status",
         "ping", "ping6", "traceroute", "tracepath",
-        "nslookup", "dig", "host",
-        "resolvectl status", "resolvectl query",
+        "nslookup", "dig", "host", "resolvectl status",
         "curl -I", "curl -svo /dev/null",
         "systemctl status", "systemctl list-units",
         "systemctl list-units --failed", "systemctl list-timers",
         "systemctl is-active", "systemctl is-enabled",
         "journalctl -n", "journalctl -u",
         "journalctl --since", "journalctl -b", "journalctl -p err",
-        "dmesg", "dmesg -T", "dmesg --level=err,warn",
+        "dmesg", "dmesg -T",
         "loginctl", "loginctl list-sessions",
-        "dnf list installed", "dnf list updates",
-        "dnf info", "dnf check",
+        "dnf list installed", "dnf list updates", "dnf info",
         "rpm -qa", "rpm -qi", "rpm -qf",
-        "flatpak list", "flatpak info",
-        "pip list", "pip show", "pip3 list",
+        "apt list --installed", "apt show",
+        "flatpak list", "pip list", "pip show",
         "git status", "git log", "git log --oneline",
         "git diff", "git branch", "git remote -v",
         "python3 --version", "gcc --version",
+        "vcc --version",          # VeroCC
         "make --version", "cargo --version",
         "rustc --version", "node --version",
         "last", "lastlog", "who", "w",
         "groups", "getent passwd", "getent group",
         "timedatectl", "timedatectl status",
         "localectl", "hostnamectl",
-        "bpftool prog list", "bpftool map list", "bpftool net list",
+        "bpftool prog list", "bpftool map list",
+        # BSD
+        "ifconfig", "ifconfig -a",
+        "sockstat", "sockstat -l",
+        "fstat", "sysctl", "sysctl -a",
+        "service -e", "service -l",
+        "rcctl ls all", "rcctl ls started",
+        "pkg info", "pkg_info", "pkgin list",
+        "pfctl -s rules", "pfctl -s info",
+        "gpart show",
     ])
 
     # ── Security ──────────────────────────────────────────────────────────────
-    # Encrypt audit log lines written to disk (requires PYSI_ENCRYPTION_KEY in .env)
-    encrypt_logs: bool = False
+    encrypt_logs:     bool      = False
+    # Require .confirm <token> before running .exec-raw (Owner only)
+    confirm_exec_raw: bool      = True
+    # Rate limiting
+    rate_limit_commands: int    = 15     # max commands per window
+    rate_limit_window:   int    = 60     # window size in seconds
+    # Restrict commands to specific channel IDs (empty = any channel)
+    allowed_channel_ids: List[int] = field(default_factory=list)
 
     # ── File transfer ─────────────────────────────────────────────────────────
-    file_transfer_max_bytes: int = 52_428_800  # 50 MB
+    file_transfer_max_bytes: int = 52_428_800
 
     # ── Logging ───────────────────────────────────────────────────────────────
     log_channel_id: Optional[int] = None
-    log_dir: str = "logs"
-
-    # ── Class methods ─────────────────────────────────────────────────────────
+    log_dir:        str           = "logs"
 
     @classmethod
     def load(cls) -> Settings:
@@ -95,7 +101,6 @@ class Settings:
             s = cls()
             s.save()
             print(f"[PysiAdmin] Created default config at {CONFIG_PATH}")
-            print("[PysiAdmin] Add your Discord user ID to owner_ids, then restart.")
             return s
         with open(CONFIG_PATH) as f:
             data = json.load(f)

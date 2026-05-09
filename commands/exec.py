@@ -1,17 +1,6 @@
 """
 PysiAdmin — commands/exec.py
-
-Two execution modes (set exec_mode in pysi-config.json):
-
-  "whitelist"  (default, safest)
-      .exec only runs commands listed in exec_whitelist.
-
-  "denylist"   (more freedom)
-      .exec runs any command not matching BLOCKED_PATTERNS or
-      BLOCKED_COMMANDS. exec_whitelist is ignored in this mode.
-
-.exec-raw — Owner only. Bypasses whitelist/denylist entirely.
-            BLOCKED_PATTERNS still apply even here.
+0.2.0: .exec-raw now requires .confirm <token> when confirm_exec_raw=true in config.
 """
 
 from __future__ import annotations
@@ -25,7 +14,6 @@ from core.auth import Tier, require_tier
 
 TIMEOUT_SECONDS = 30
 
-# ── Hardcoded blocked path/token patterns (apply to ALL tiers, ALL modes) ────
 BLOCKED_PATTERNS = [
     "/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/sudoers.d",
     "/root/", "/proc/kcore", "/proc/sysrq-trigger",
@@ -34,10 +22,15 @@ BLOCKED_PATTERNS = [
     "DISCORD_BOT_TOKEN", "BOT_TOKEN", ".env", "pysi-config",
     "/etc/passwd", "/etc/group", "/etc/crypttab",
     "/boot/", "/sys/firmware",
+    # BSD-specific sensitive paths
+    "/etc/master.passwd",   # OpenBSD / FreeBSD shadow equivalent
+    "/etc/spwd.db",
+    "/etc/pwd.db",
+    "/etc/pf.conf",         # firewall rules
+    "/boot/loader.conf",
+    "/boot/kernel",
 ]
 
-# ── Blocked command prefixes in denylist mode ─────────────────────────────────
-# These base commands are always refused regardless of arguments.
 BLOCKED_COMMANDS = {
     "rm", "rmdir", "shred", "unlink",
     "dd", "mkfs", "fdisk", "parted", "gdisk", "wipefs",
@@ -45,33 +38,33 @@ BLOCKED_COMMANDS = {
     "sudo", "su", "pkexec", "doas", "newgrp",
     "passwd", "useradd", "userdel", "usermod", "groupadd", "groupdel",
     "iptables", "ip6tables", "nftables", "firewall-cmd", "ufw",
-    "wget", "curl",        # allow curl -I only via whitelist mode
+    "pfctl",    # BSD firewall — read-only pfctl -s is in whitelist
+    "wget", "curl",
     "nc", "ncat", "socat", "netcat",
     "python", "python3", "perl", "ruby", "lua", "php",
-    "bash", "sh", "zsh", "fish", "dash", "ksh",
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
     "crontab", "at", "batch",
     "ssh", "scp", "sftp", "rsync",
     "sysctl",
-    "modprobe", "rmmod", "insmod", "lsmod",
-    "mount", "umount",     # read-only mount is in whitelist; denylist blocks write
-    "systemctl",           # use .exec in whitelist mode for specific systemctl queries
-    "journalctl",          # same
-    "strace", "ltrace", "gdb", "lldb",
+    "modprobe", "rmmod", "insmod",
+    "mount", "umount",
+    "systemctl", "journalctl", "service", "rcctl",
+    "strace", "ltrace", "gdb", "lldb", "truss", "kdump",  # truss/kdump = BSD strace
     "tcpdump", "wireshark", "tshark",
-    "kill", "killall", "pkill",   # use .kill command instead
+    "kill", "killall", "pkill",
     "reboot", "shutdown", "poweroff", "halt", "init",
     "format", "truncate",
     "visudo", "vipw",
-    "chroot", "unshare", "nsenter",
+    "chroot", "jail",       # jail = BSD chroot equivalent
+    "unshare", "nsenter",
     "docker", "podman", "kubectl",
+    "kldload", "kldunload",  # BSD kernel module load/unload
 }
 
 
 class ExecCommands(commands.Cog, name="Execution"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     async def _run(self, command: str) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_shell(
@@ -100,8 +93,7 @@ class ExecCommands(commands.Cog, name="Execution"):
         return False, ""
 
     def _contains_blocked_command(self, command: str) -> tuple[bool, str]:
-        """Check if the base command (first token) is in BLOCKED_COMMANDS."""
-        base = command.strip().split()[0].split("/")[-1]  # strip path prefix too
+        base = command.strip().split()[0].split("/")[-1]
         if base in BLOCKED_COMMANDS:
             return True, base
         return False, ""
@@ -125,61 +117,32 @@ class ExecCommands(commands.Cog, name="Execution"):
     def _denied(self, title: str, desc: str) -> discord.Embed:
         return discord.Embed(title=title, description=desc, color=discord.Color.red())
 
-    # ── .exec ─────────────────────────────────────────────────────────────────
-
     @commands.command(name="exec")
     @require_tier(Tier.ADMIN)
     async def exec_cmd(self, ctx: commands.Context, *, command: str) -> None:
-        """
-        Run a shell command.
-        Behaviour depends on exec_mode in pysi-config.json:
-          whitelist — command must be in exec_whitelist
-          denylist  — command must not match BLOCKED_PATTERNS or BLOCKED_COMMANDS
-        """
         mode = self.bot.settings.exec_mode
 
-        # 1. Blocked-pattern check — always first, regardless of mode
         hit, pat = self._contains_blocked_pattern(command)
         if hit:
-            await ctx.send(embed=self._denied(
-                "⛔ Blocked Pattern",
-                f"References protected path/token: `{pat}`",
-            ))
-            await self.bot.audit.log_command(
-                str(ctx.author.id), f".exec {command}", "DENIED", f"blocked_pattern={pat!r}"
-            )
+            await ctx.send(embed=self._denied("⛔ Blocked Pattern", f"References: `{pat}`"))
+            await self.bot.audit.log_command(str(ctx.author.id), f".exec {command}", "DENIED", f"blocked_pattern={pat!r}")
             return
 
         if mode == "whitelist":
             if not self._whitelisted(command):
                 await ctx.send(embed=self._denied(
                     "⛔ Not Whitelisted",
-                    f"`{command}` is not in `exec_whitelist`.\n"
-                    "Edit `pysi-config.json` on disk to add it, or switch to denylist mode.",
+                    f"`{command}` not in `exec_whitelist`.\nEdit `pysi-config.json` to add it.",
                 ))
-                await self.bot.audit.log_command(
-                    str(ctx.author.id), f".exec {command}", "DENIED", "not whitelisted"
-                )
+                await self.bot.audit.log_command(str(ctx.author.id), f".exec {command}", "DENIED", "not whitelisted")
                 return
-
         elif mode == "denylist":
             hit_cmd, base = self._contains_blocked_command(command)
             if hit_cmd:
-                await ctx.send(embed=self._denied(
-                    "⛔ Blocked Command",
-                    f"`{base}` is in the permanent block list.\n"
-                    "Use `.exec-raw` (Owner only) if you genuinely need this.",
-                ))
-                await self.bot.audit.log_command(
-                    str(ctx.author.id), f".exec {command}", "DENIED", f"blocked_cmd={base!r}"
-                )
+                await ctx.send(embed=self._denied("⛔ Blocked Command", f"`{base}` is permanently blocked."))
+                await self.bot.audit.log_command(str(ctx.author.id), f".exec {command}", "DENIED", f"blocked_cmd={base!r}")
                 return
 
-        else:
-            await ctx.send(f"⚠️ Unknown exec_mode `{mode}` — check pysi-config.json.")
-            return
-
-        # 2. Execute
         await self.bot.audit.log_command(str(ctx.author.id), f".exec {command}", "EXECUTING")
         rc, out, err = await self._run(command)
         output = self._format_output(out, err)
@@ -191,42 +154,91 @@ class ExecCommands(commands.Cog, name="Execution"):
         embed.add_field(name="Command", value=f"`{command}`",        inline=False)
         embed.add_field(name="Output",  value=f"```\n{output}\n```", inline=False)
         await ctx.send(embed=embed)
-        await self.bot.audit.log_command(
-            str(ctx.author.id), f".exec {command}", "OK", f"rc={rc}"
-        )
-
-    # ── .exec-raw ─────────────────────────────────────────────────────────────
+        await self.bot.audit.log_command(str(ctx.author.id), f".exec {command}", "OK", f"rc={rc}")
 
     @commands.command(name="exec-raw")
     @require_tier(Tier.OWNER)
     async def exec_raw(self, ctx: commands.Context, *, command: str) -> None:
-        """Run any command — BLOCKED_PATTERNS still apply. Owner only."""
+        """Run any command. If confirm_exec_raw=true, requires .confirm <token>."""
         hit, pat = self._contains_blocked_pattern(command)
         if hit:
             await ctx.send(embed=self._denied(
                 "⛔ Blocked Pattern",
-                f"References protected path/token: `{pat}`\n"
-                "Edit `BLOCKED_PATTERNS` in `commands/exec.py` on disk to override.",
+                f"References: `{pat}`\nEdit `commands/exec.py` on disk to override.",
             ))
-            await self.bot.audit.log_command(
-                str(ctx.author.id), f".exec-raw {command}", "DENIED", f"blocked_pattern={pat!r}"
-            )
+            await self.bot.audit.log_command(str(ctx.author.id), f".exec-raw {command}", "DENIED", f"blocked_pattern={pat!r}")
             return
 
-        await self.bot.audit.log_command(str(ctx.author.id), f".exec-raw {command}", "EXECUTING")
-        rc, out, err = await self._run(command)
-        output = self._format_output(out, err)
+        if self.bot.settings.confirm_exec_raw:
+            # Store pending confirmation and require .confirm <token>
+            uid = str(ctx.author.id)
 
-        embed = discord.Embed(
-            title=f"👑 exec-raw  (rc={rc})",
-            color=discord.Color.green() if rc == 0 else discord.Color.orange(),
-        )
-        embed.add_field(name="Command", value=f"`{command}`",        inline=False)
-        embed.add_field(name="Output",  value=f"```\n{output}\n```", inline=False)
-        await ctx.send(embed=embed)
-        await self.bot.audit.log_command(
-            str(ctx.author.id), f".exec-raw {command}", "OK", f"rc={rc}"
-        )
+            async def _execute():
+                await self.bot.audit.log_command(uid, f".exec-raw {command}", "EXECUTING")
+                rc, out, err = await self._run(command)
+                output = self._format_output(out, err)
+                embed = discord.Embed(
+                    title=f"👑 exec-raw  (rc={rc})",
+                    color=discord.Color.green() if rc == 0 else discord.Color.orange(),
+                )
+                embed.add_field(name="Command", value=f"`{command}`",        inline=False)
+                embed.add_field(name="Output",  value=f"```\n{output}\n```", inline=False)
+                await ctx.send(embed=embed)
+                await self.bot.audit.log_command(uid, f".exec-raw {command}", "OK", f"rc={rc}")
+
+            token = self.bot.sessions.create(
+                user_id    = uid,
+                command    = command,
+                callback   = _execute,
+                channel_id = ctx.channel.id,
+                ttl        = 30,
+            )
+            await ctx.send(embed=discord.Embed(
+                title="⚠️ Confirmation Required",
+                description=(
+                    f"Command: `{command}`\n\n"
+                    f"Type `.confirm {token}` within **30 seconds** to execute.\n"
+                    "Type `.cancel` to abort."
+                ),
+                color=discord.Color.gold(),
+            ))
+            await self.bot.audit.log_command(uid, f".exec-raw {command}", "PENDING_CONFIRM", f"token={token}")
+        else:
+            # confirm_exec_raw disabled — execute immediately
+            await self.bot.audit.log_command(str(ctx.author.id), f".exec-raw {command}", "EXECUTING")
+            rc, out, err = await self._run(command)
+            output = self._format_output(out, err)
+            embed = discord.Embed(
+                title=f"👑 exec-raw  (rc={rc})",
+                color=discord.Color.green() if rc == 0 else discord.Color.orange(),
+            )
+            embed.add_field(name="Command", value=f"`{command}`",        inline=False)
+            embed.add_field(name="Output",  value=f"```\n{output}\n```", inline=False)
+            await ctx.send(embed=embed)
+            await self.bot.audit.log_command(str(ctx.author.id), f".exec-raw {command}", "OK", f"rc={rc}")
+
+    @commands.command(name="confirm")
+    @require_tier(Tier.OWNER)
+    async def confirm(self, ctx: commands.Context, token: str) -> None:
+        """Confirm a pending .exec-raw operation."""
+        uid   = str(ctx.author.id)
+        entry = self.bot.sessions.consume(token, uid)
+        if entry is None:
+            await ctx.send(embed=discord.Embed(
+                title="❌ Invalid or Expired Token",
+                description="Token not found, already used, or expired (30s TTL).",
+                color=discord.Color.red(),
+            ))
+            return
+        await self.bot.audit.log_command(uid, f".confirm {token}", "OK", f"cmd={entry.command!r}")
+        await entry.callback()
+
+    @commands.command(name="cancel")
+    @require_tier(Tier.OWNER)
+    async def cancel(self, ctx: commands.Context) -> None:
+        """Cancel all your pending confirmations."""
+        n = self.bot.sessions.cancel(str(ctx.author.id))
+        await ctx.send(f"✅ Cancelled {n} pending confirmation(s).")
 
 
 async def setup(bot: commands.Bot) -> None:
